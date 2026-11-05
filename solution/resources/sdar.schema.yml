@@ -1,0 +1,17 @@
+# SDAR's schema, in an existing catalog. The bundle owns this schema only, so its grants are bundle grants.
+# Grants on objects SDAR doesn't own (system, the catalog, governed catalogs) are added by sdar_admin_setup.
+resources:
+  schemas:
+    sdar:
+      catalog_name: ${var.sdar_catalog}
+      name: ${var.sdar_schema}
+      comment: Sensitive Data Access Review (SDAR) evidence tables.
+      lifecycle:
+        prevent_destroy: true   # bundle destroy would otherwise delete SDAR's evidence tables
+      grants:
+        - principal: ${var.security_sp_application_id}
+          privileges: [USE_SCHEMA, SELECT, MODIFY, CREATE_TABLE, CREATE_FUNCTION, EXECUTE]
+        - principal: ${var.group_reader_sp_application_id}
+          privileges: [USE_SCHEMA]
+        - principal: ${var.security_audience_group}
+          privileges: [USE_SCHEMA]

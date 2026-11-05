@@ -1,0 +1,105 @@
+# Common job parameters: every SQL file reads the ones it needs.
+x-sdar-parameters: &sdar_parameters
+  - { name: sdar_catalog, default: "${var.sdar_catalog}" }
+  - { name: sdar_schema, default: "${var.sdar_schema}" }
+  - { name: sensitive_tag_key, default: "${var.sensitive_tag_key}" }
+  - { name: sensitive_tag_values, default: "${var.sensitive_tag_values}" }
+
+resources:
+  jobs:
+    sdar_admin_setup:
+      name: sdar-admin-setup
+      description: Run once by a metastore admin. Grants on the system catalog, SDAR's catalog, and each governed catalog.
+      run_as:
+        user_name: ${workspace.current_user.userName}
+      tasks:
+        - task_key: grants
+          notebook_task:
+            notebook_path: ../src/admin/grants.py
+            base_parameters:
+              sdar_catalog: ${var.sdar_catalog}
+              security_sp: ${var.security_sp_application_id}
+              group_reader_sp: ${var.group_reader_sp_application_id}
+              governed_catalogs: ${var.governed_catalogs}
+
+    sdar_setup:
+      name: sdar-setup
+      description: Creates SDAR's tables, owned by the SDAR service principal. Safe to rerun.
+      run_as:
+        service_principal_name: ${var.security_sp_application_id}
+      parameters:
+        - { name: sdar_catalog, default: "${var.sdar_catalog}" }
+        - { name: sdar_schema, default: "${var.sdar_schema}" }
+        - { name: security_audience_group, default: "${var.security_audience_group}" }
+        - { name: group_reader_sp, default: "${var.group_reader_sp_application_id}" }
+      tasks:
+        - task_key: tables
+          sql_task:
+            warehouse_id: ${var.warehouse_id}
+            file:
+              path: ../src/setup/tables.sql
+
+    sdar_check:
+      name: sdar-check-morning
+      description: >-
+        Steps 2 to 4. Copies membership, policy, and tag changes from the audit log, adds the baseline, checks
+        for drift, then records yesterday's sensitive reads with the steward flag.
+      schedule:
+        quartz_cron_expression: "0 0 6 * * ?"   # 06:00 in check_timezone; checks yesterday (UTC)
+        timezone_id: ${var.check_timezone}
+      run_as:
+        service_principal_name: ${var.security_sp_application_id}
+      parameters:
+        - { name: sdar_catalog, default: "${var.sdar_catalog}" }
+        - { name: sdar_schema, default: "${var.sdar_schema}" }
+        - { name: sensitive_tag_key, default: "${var.sensitive_tag_key}" }
+        - { name: sensitive_tag_values, default: "${var.sensitive_tag_values}" }
+        - { name: check_date, default: "" }        # empty: yesterday (UTC). yyyy-MM-dd reruns one day
+        - { name: lookback_days, default: "3" }    # days of audit events to copy; 365 for the first run
+      tasks:
+        - task_key: membership_events
+          sql_task: { warehouse_id: "${var.warehouse_id}", file: { path: ../src/copy/membership_events.sql } }
+        - task_key: policy_events
+          sql_task: { warehouse_id: "${var.warehouse_id}", file: { path: ../src/copy/policy_events.sql } }
+        - task_key: tag_events
+          sql_task: { warehouse_id: "${var.warehouse_id}", file: { path: ../src/copy/tag_events.sql } }
+        - task_key: table_masks
+          sql_task: { warehouse_id: "${var.warehouse_id}", file: { path: ../src/copy/table_masks.sql } }
+        - task_key: baseline
+          depends_on: [ { task_key: policy_events }, { task_key: tag_events } ]
+          sql_task: { warehouse_id: "${var.warehouse_id}", file: { path: ../src/copy/baseline.sql } }
+        - task_key: drift
+          depends_on: [ { task_key: baseline } ]
+          sql_task: { warehouse_id: "${var.warehouse_id}", file: { path: ../src/check/drift.sql } }
+        - task_key: sensitive_access_check
+          depends_on: [ { task_key: membership_events }, { task_key: table_masks }, { task_key: drift } ]
+          sql_task: { warehouse_id: "${var.warehouse_id}", file: { path: ../src/check/daily_sensitive_access.sql } }
+
+    sdar_hygiene:
+      name: sdar-hygiene-weekly
+      description: Weekly checks that need a person, such as table-level masks without an override row.
+      schedule:
+        quartz_cron_expression: "0 0 7 ? * MON"
+        timezone_id: ${var.check_timezone}
+      run_as:
+        service_principal_name: ${var.security_sp_application_id}
+      parameters: *sdar_parameters
+      tasks:
+        - task_key: hygiene
+          sql_task: { warehouse_id: "${var.warehouse_id}", file: { path: ../src/hygiene/hygiene.sql } }
+
+    sdar_reconcile:
+      name: sdar-membership-reconcile
+      description: Membership reconcile. No schedule. Run by hand at setup and quarterly. The only job with the account admin role.
+      run_as:
+        service_principal_name: ${var.group_reader_sp_application_id}
+      tasks:
+        - task_key: reconcile
+          notebook_task:
+            notebook_path: ../src/reconcile/reconcile_group_membership.py
+            base_parameters:
+              sdar_catalog: ${var.sdar_catalog}
+              sdar_schema: ${var.sdar_schema}
+              account_id: ${var.account_id}
+              account_host: ${var.account_host}
+              secret_scope: ${var.secret_scope}

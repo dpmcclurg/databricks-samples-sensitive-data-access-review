@@ -1,0 +1,159 @@
+# Alerts. Each query returns one row with one count; the alert fires when it is above 0.
+# The queries name SDAR's tables through bundle variables, so they stay inline here.
+resources:
+  alerts:
+    sdar_steward_reads:
+      display_name: "Sensitive data read by stewards (yesterday)"
+      query_text: |
+        SELECT count(DISTINCT record_id) AS steward_reads
+        FROM ${var.sdar_catalog}.${var.sdar_schema}.sensitive_access_events
+        WHERE event_date = date_sub(to_date(convert_timezone('UTC', current_timestamp())), 1)
+          AND is_steward
+      warehouse_id: ${var.warehouse_id}
+      evaluation:
+        comparison_operator: GREATER_THAN
+        source:
+          name: steward_reads
+          display: steward_reads
+        threshold:
+          value:
+            double_value: 0
+        notification:
+          notify_on_ok: false
+          retrigger_seconds: 86400          # at most one email a day
+          subscriptions:
+            - user_email: ${var.alert_user_email}
+      schedule:
+        quartz_cron_schedule: "0 0 7 * * ?"
+        timezone_id: ${var.check_timezone}
+      run_as:
+        service_principal_name: ${var.security_sp_application_id}
+
+    sdar_shared_permission_dashboards:
+      display_name: "Sensitive dashboards on shared data permissions (yesterday)"
+      query_text: |
+        SELECT count(DISTINCT dashboard_id) AS shared_permission_dashboards
+        FROM ${var.sdar_catalog}.${var.sdar_schema}.sensitive_dashboard_views
+        WHERE event_date = date_sub(to_date(convert_timezone('UTC', current_timestamp())), 1)
+          AND credentials_embedded = 'true'
+      warehouse_id: ${var.warehouse_id}
+      evaluation:
+        comparison_operator: GREATER_THAN
+        source:
+          name: shared_permission_dashboards
+          display: shared_permission_dashboards
+        threshold:
+          value:
+            double_value: 0
+        notification:
+          notify_on_ok: false
+          retrigger_seconds: 86400          # at most one email a day
+          subscriptions:
+            - user_email: ${var.alert_user_email}
+      schedule:
+        quartz_cron_schedule: "0 5 7 * * ?"
+        timezone_id: ${var.check_timezone}
+      run_as:
+        service_principal_name: ${var.security_sp_application_id}
+
+    sdar_steward_list_changes:
+      display_name: "Steward list changed since yesterday"
+      query_text: |
+        -- Changes yesterday (UTC) to column mask policies: created, updated, or deleted. policy_events names who
+        -- made each change; select * from it for the details.
+        SELECT count(*) AS steward_list_changes
+        FROM ${var.sdar_catalog}.${var.sdar_schema}.policy_events
+        WHERE source = 'audit'
+          AND event_date = date_sub(to_date(convert_timezone('UTC', current_timestamp())), 1)
+          AND (policy_type = 'POLICY_TYPE_COLUMN_MASK' OR action = 'delete')
+      warehouse_id: ${var.warehouse_id}
+      evaluation:
+        comparison_operator: GREATER_THAN
+        source:
+          name: steward_list_changes
+          display: steward_list_changes
+        threshold:
+          value:
+            double_value: 0
+        notification:
+          notify_on_ok: false
+          retrigger_seconds: 86400          # at most one email a day
+          subscriptions:
+            - user_email: ${var.alert_user_email}
+      schedule:
+        quartz_cron_schedule: "0 10 7 * * ?"
+        timezone_id: ${var.check_timezone}
+      run_as:
+        service_principal_name: ${var.security_sp_application_id}
+
+    sdar_health:
+      display_name: "SDAR health check: inputs missing"
+      query_text: |
+        WITH problems AS (
+          SELECT 'membership copy did not run this morning' AS problem
+          WHERE NOT EXISTS (SELECT 1 FROM ${var.sdar_catalog}.${var.sdar_schema}.sdar_load_log l
+                            WHERE l.task = 'membership_events' AND l.run_time >= current_timestamp() - INTERVAL 12 HOURS)
+          UNION ALL
+          SELECT 'policy copy did not run this morning'
+          WHERE NOT EXISTS (SELECT 1 FROM ${var.sdar_catalog}.${var.sdar_schema}.sdar_load_log l
+                            WHERE l.task = 'policy_events' AND l.run_time >= current_timestamp() - INTERVAL 12 HOURS)
+          UNION ALL
+          SELECT 'tag copy did not run this morning'
+          WHERE NOT EXISTS (SELECT 1 FROM ${var.sdar_catalog}.${var.sdar_schema}.sdar_load_log l
+                            WHERE l.task = 'tag_events' AND l.run_time >= current_timestamp() - INTERVAL 12 HOURS)
+          UNION ALL
+          SELECT DISTINCT concat('drift: ', kind, ' ', object)
+          FROM ${var.sdar_catalog}.${var.sdar_schema}.sdar_drift WHERE check_time >= current_timestamp() - INTERVAL 12 HOURS
+          UNION ALL
+          SELECT DISTINCT concat('steward group with no members: ', s.steward)
+          FROM ${var.sdar_catalog}.${var.sdar_schema}.steward_list_current s
+          WHERE s.steward NOT LIKE '%@%'                                   -- users named directly
+            AND NOT s.steward RLIKE '^[0-9a-fA-F-]{36}$'                 -- service principals named directly
+            AND NOT EXISTS (SELECT 1 FROM ${var.sdar_catalog}.${var.sdar_schema}.group_membership_current c WHERE c.group_name = s.steward)
+        )
+        SELECT count(*) AS health_problems FROM problems
+      warehouse_id: ${var.warehouse_id}
+      evaluation:
+        comparison_operator: GREATER_THAN
+        source:
+          name: health_problems
+          display: health_problems
+        threshold:
+          value:
+            double_value: 0
+        notification:
+          notify_on_ok: false
+          retrigger_seconds: 86400          # at most one email a day
+          subscriptions:
+            - user_email: ${var.alert_user_email}
+      schedule:
+        quartz_cron_schedule: "0 30 7 * * ?"
+        timezone_id: ${var.check_timezone}
+      run_as:
+        service_principal_name: ${var.security_sp_application_id}
+
+    sdar_hygiene_findings:
+      display_name: "SDAR hygiene findings this week"
+      query_text: |
+        SELECT count(*) AS hygiene_findings
+        FROM ${var.sdar_catalog}.${var.sdar_schema}.sdar_hygiene
+        WHERE run_time >= current_timestamp() - INTERVAL 1 DAY
+      warehouse_id: ${var.warehouse_id}
+      evaluation:
+        comparison_operator: GREATER_THAN
+        source:
+          name: hygiene_findings
+          display: hygiene_findings
+        threshold:
+          value:
+            double_value: 0
+        notification:
+          notify_on_ok: false
+          retrigger_seconds: 86400          # at most one email a day
+          subscriptions:
+            - user_email: ${var.alert_user_email}
+      schedule:
+        quartz_cron_schedule: "0 30 7 ? * MON"
+        timezone_id: ${var.check_timezone}
+      run_as:
+        service_principal_name: ${var.security_sp_application_id}

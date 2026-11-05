@@ -1,0 +1,64 @@
+# Sensitive Data Access Review (SDAR): who read data tagged as sensitive, and which of those readers were
+# stewards (exempt from the mask) at the moment of the read. Deploy this bundle into an existing workspace;
+# no Terraform is needed. See the README for the one-time prerequisites and the run order.
+bundle:
+  name: sdar
+
+include:
+  - resources/*.yml
+
+variables:
+  sdar_catalog:
+    description: Existing catalog that holds SDAR's schema
+    default: observability
+  sdar_schema:
+    description: Schema SDAR creates for its tables
+    default: security
+  warehouse_id:
+    description: Serverless SQL warehouse for SDAR's SQL tasks and alerts
+  sensitive_tag_key:
+    description: Governed tag key that marks sensitive columns
+    default: sensitivity
+  sensitive_tag_values:
+    description: Comma-separated tag values that count as sensitive
+    default: restricted
+  governed_catalogs:
+    description: Comma-separated catalogs that hold sensitive data (admin setup grants BROWSE and READ METADATA on each)
+  security_sp_application_id:
+    description: Application ID of the service principal that runs every SDAR job and alert
+  group_reader_sp_application_id:
+    description: Application ID of the service principal that runs the reconcile (account admin)
+  security_audience_group:
+    description: Group that may read SDAR's output
+  account_id:
+    description: Databricks account ID, for the reconcile
+  account_host:
+    description: Account console host, for the reconcile
+    default: https://accounts.azuredatabricks.net
+  secret_scope:
+    description: Secret scope that holds the reconcile credential (a one-time prerequisite, see the README)
+    default: sdar
+  alert_user_email:
+    description: User who receives the alert emails (or replace the subscriptions with a notification destination)
+  check_timezone:
+    description: Time zone of the morning check and alerts
+    default: UTC
+
+# Jobs that run as a service principal read their files from the bundle folder. These permissions apply to
+# every resource in the bundle, which is why the reconcile's secret scope is created outside it.
+permissions:
+  - user_name: ${workspace.current_user.userName}
+    level: CAN_MANAGE
+  - service_principal_name: ${var.security_sp_application_id}
+    level: CAN_VIEW
+  - service_principal_name: ${var.group_reader_sp_application_id}
+    level: CAN_VIEW
+
+targets:
+  dev:
+    default: true
+    presets:
+      trigger_pause_status: PAUSED
+  prod:
+    presets:
+      trigger_pause_status: UNPAUSED
